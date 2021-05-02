@@ -1,0 +1,108 @@
+﻿--STEP1 : Load Sample Dara (iris dataset)
+
+CREATE TABLE iris (
+
+sepal_length FLOAT,
+sepal_width FLOAT,	
+petal_length FLOAT,
+petal_width FLOAT,
+type VARCHAR(50)
+ 
+)
+
+COPY iris(sepal_length ,sepal_width , petal_length , petal_width,type )
+FROM '/home/sara/Downloads/iris.csv'
+DELIMITER ','
+CSV HEADER;
+
+--Checking data is inserted or not
+select * from iris
+
+--STEP 2 : Create extension .. PL/Python is the extension that allows you to run Python code without leaving Postgres
+-- in cmd : sudo apt-get install postgresql-contrib postgresql-plpython3
+CREATE EXTENSION plpython3u
+
+--STEP 3: Check of the plpython installation
+SELECT * FROM pg_available_extensions WHERE name like '%plpython%';
+
+--STEP 4: Applying KMeans Algorithm 
+
+CREATE OR replace FUNCTION kmeans(input_table text, columns text[], clus_num int) RETURNS bytea AS
+ 
+$$
+ 
+from pandas import DataFrame
+from sklearn.cluster import KMeans
+from cPickle import dumps
+ 
+all_columns = ",".join(columns)
+if all_columns == "":
+    all_columns = "*"
+ 
+rv = plpy.execute('SELECT %s FROM %s;' % (all_columns, plpy.quote_ident(input_table)))
+ 
+frame = []
+ 
+for i in rv:
+    frame.append(i)
+df = DataFrame(frame).convert_objects(convert_numeric =True)
+kmeans = KMeans(n_clusters=clus_num, random_state=0).fit(df._get_numeric_data())
+
+#Finally, we dump it into a cPickle and returned the object stored in a Pickle. Pickling is necessary to restore the model later, since otherwise Python would not be able to restore the kmeans object directly from a bytearray coming from PostgreSQL.
+return dumps(kmeans)
+ 
+$$ LANGUAGE plpythonu3;
+
+--STEP 5 : Storing the Model in a table
+#Create a model table 
+CREATE TABLE models (
+id SERIAL PRIMARY KEY,
+model BYTEA NOT NULL
+);
+
+--In this case, we are passing the columns parameter as an empty array to perform clustering with all the numeric variables in the table.
+INSERT INTO models(model) SELECT kmeans('iris', array[]::text[], 3);
+
+select * from models;
+
+-----------------------------
+
+--STEP 6 : Displaying model Info - (Get Centeroids)
+CREATE OR replace FUNCTION get_kmeans_centroids(model_table text, model_column text, model_id int) RETURNS real[] AS
+ 
+$$
+ 
+from pandas import DataFrame
+from cPickle import loads
+ 
+rv = plpy.execute('SELECT %s FROM %s WHERE id = %s;' % (plpy.quote_ident(model_column), plpy.quote_ident(model_table), model_id))
+model = loads(rv[0][model_column])
+ret = map(list, model.cluster_centers_)
+return ret
+ 
+$$ LANGUAGE plpythonu;
+
+select get_kmeans_centroids('models','model',1);
+
+--STEP 7 : Making Predictions
+
+CREATE OR replace FUNCTION predict_kmeans(model_table text, model_column text, model_id int, input_values real[]) RETURNS int[] AS
+ 
+$$
+ 
+from cPickle import loads
+ 
+rv = plpy.execute('SELECT %s FROM %s WHERE id = %s;' % (plpy.quote_ident(model_column), plpy.quote_ident(model_table), model_id))
+model = loads(rv[0][model_column])
+ret = model.predict(input_values)
+return ret
+ 
+$$ LANGUAGE plpythonu;
+
+-- STEP 8 : Testing by Passing Values
+
+select species,predict_kmeans('models','model',1,array[[petal_length,petal_width,sepal_length,sepal_width]]) from iris;
+
+
+
+
